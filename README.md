@@ -6,7 +6,9 @@ You are a scribe in a medieval scriptorium. The beasts illuminated in the margin
 
 ## Controls
 
-Arrows/WASD move · Z bolt · X slash · C bind · Tab swap familiar
+Arrows/WASD move · Z bolt · X slash · C bind · Tab swap familiar · M mute
+
+Four beast species roam the garden: Drollery, Grotesque, Basilisk and the rare Snail-Knight.
 
 ## Run it
 

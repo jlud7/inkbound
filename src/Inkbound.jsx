@@ -19,13 +19,15 @@ import React, { useEffect, useRef, useState } from 'react';
 // ----------------------------------------------------------------------------
 const CFG = {
   // Overworld
-  MAP_COLS: 15,
-  MAP_ROWS: 15,
-  TILE_SIZE: 36,
+  MAP_COLS: 24,
+  MAP_ROWS: 16,
+  TILE_SIZE: 32,
   STEP_MS: 140, // ms per overworld tile-step while a direction is held
   STEP_ANIM_MS: 100, // CSS glide duration for the avatar transform
   ENCOUNTER_CHANCE: 0.15, // per margin-tile step
   PITY_STEPS: 10, // guaranteed encounter on the Nth consecutive margin step
+  BLOCKING_GLYPHS: '#TUWt', // wall/hedge, tree, fountain, well, statue — single walkability source
+  AREA_NAME: 'The Cloister Garden',
 
   // Transition
   TRANSITION_MS: 1200,
@@ -55,7 +57,7 @@ const CFG = {
   SWAP_IFRAME_MS: 500,
 
   PARTY_MAX: 6,
-  TOTAL_SPECIES: 3, // Drollery, Grotesque, Basilisk
+  TOTAL_SPECIES: 4, // Drollery, Grotesque, Basilisk, Snail-Knight
 
   RESULT_MS: 2000,
 
@@ -65,6 +67,39 @@ const CFG = {
     vermilion: '#C1440E',
     gold: '#C9A227',
     indigo: '#34405E',
+    grass: '#C6C79E', // soft sage-parchment green wash for `'` terrain
+  },
+
+  // Battle-feel effect tunables (all driven by the rAF loop except pure-CSS bob)
+  FX: {
+    DMG_NUM_MS: 600, // floating damage-number lifetime
+    DMG_NUM_RISE_PX: 24, // how far a damage number floats up over its lifetime
+    DMG_NUM_MAX: 20, // hard cap on live damage numbers (oldest dropped first)
+    SHAKE_MS: 150, // screen-shake duration when the player takes damage
+    SHAKE_MAX_PX: 4, // max shake displacement (decays linearly to 0)
+    BOB_S: 1.6, // idle-bob period (pure cosmetic CSS keyframes)
+    BOB_PX: 3, // idle-bob amplitude
+    BIND_STAMP_IN_MS: 200, // seal-stamp scale-in
+    BIND_STAMP_CRACK_MS: 250, // seal-stamp crack-apart on a failed bind
+    BIND_FAIL_FLASH_MS: 300, // vermilion flash on the enemy after a failed bind
+    ENTITY_SCALE: 1.15, // battle entities render at 115% of the tile
+  },
+
+  // WebAudio blip definitions. type: oscillator type; freqs: note sequence in
+  // Hz (or [from, to] when slide); dur: seconds (per note, or total for a
+  // slide); gain: peak gain (kept <= 0.15 everywhere). All clips < ~180ms.
+  SFX: {
+    step: { type: 'square', freqs: [220], dur: 0.002, gain: 0.025 },
+    bolt: { type: 'square', freqs: [440, 880], dur: 0.07, gain: 0.07, slide: true },
+    slash: { type: 'triangle', freqs: [950, 180], dur: 0.09, gain: 0.1, slide: true },
+    playerHit: { type: 'square', freqs: [130, 65], dur: 0.13, gain: 0.12, slide: true },
+    enemyHit: { type: 'square', freqs: [520], dur: 0.055, gain: 0.08 },
+    telegraph: { type: 'triangle', freqs: [330], dur: 0.12, gain: 0.06 },
+    bindTry: { type: 'triangle', freqs: [392, 523], dur: 0.08, gain: 0.1 },
+    bindSuccess: { type: 'triangle', freqs: [523, 659, 784], dur: 0.06, gain: 0.12 },
+    victory: { type: 'triangle', freqs: [523, 659, 784, 1047], dur: 0.045, gain: 0.12 },
+    defeat: { type: 'triangle', freqs: [392, 311], dur: 0.09, gain: 0.12 },
+    encounter: { type: 'square', freqs: [349, 466], dur: 0.08, gain: 0.1 },
   },
 
   // Player-side familiar stats. Slash/Bind are shared and unaffected by species.
@@ -73,38 +108,74 @@ const CFG = {
     Drollery: { hp: 80, boltDmg: 6, boltCd: 0.7, boltSpeed: 8, moveCdMs: 90, color: '#8A6D3B' },
     Grotesque: { hp: 130, boltDmg: 10, boltCd: 1.4, boltSpeed: 8, moveCdMs: 120, color: '#5B6B3E' },
     Basilisk: { hp: 60, boltDmg: 13, boltCd: 1.0, boltSpeed: 12, moveCdMs: 120, color: '#6B3E63' },
+    'Snail-Knight': { hp: 110, boltDmg: 9, boltCd: 1.2, boltSpeed: 8, moveCdMs: 150, color: '#D8D0C0' },
   },
 
   // Wild enemy roster (encounter table). Weights must sum to 1.
   ENEMIES: {
-    Drollery: { hp: 40, weight: 0.60, moveIntervalMs: 1200, fireMin: 2.0, fireMax: 3.0, boltSpeed: 6, boltDmg: 6 },
+    Drollery: { hp: 40, weight: 0.55, moveIntervalMs: 1200, fireMin: 2.0, fireMax: 3.0, boltSpeed: 6, boltDmg: 6 },
     Grotesque: { hp: 60, weight: 0.25, moveIntervalMs: 1800, telegraphMs: 500, swipeDmg: 15, swipeCdS: 2.5 },
     Basilisk: { hp: 30, weight: 0.15, moveIntervalMs: 1000, fireMin: 2.5, fireMax: 3.5, boltSpeed: 10, boltDmg: 12, telegraphMs: 400 },
+    'Snail-Knight': {
+      hp: 50,
+      weight: 0.05,
+      moveIntervalMs: 2200,
+      exposedMs: 2000, // shell cycle: this long exposed...
+      shelledMs: 1500, // ...then this long withdrawn into the shell
+      shellDmgFactor: 0.25, // incoming damage multiplier while shelled
+      telegraphMs: 600, // lance-charge row telegraph
+      lanceDmg: 14,
+      lanceCdS: 3.0, // riled applies BIND_RILE_FACTOR to this
+    },
   },
 };
 
 // ----------------------------------------------------------------------------
-// Overworld map. Legend: # obstacle, . path, , unfinished margin (encounter),
-// S spawn, + shrine. Border is fully walled. Verified reachable via BFS during
-// authoring: shrine and both margin patches are all reachable from spawn.
+// Overworld map — "The Cloister Garden", 24x16. An open garden, not a maze.
+// Legend: # wall/hedge (blocking), . path (tan), ' grass (walkable),
+// , unfinished margin (encounter), S spawn, + shrine (heal),
+// T tree (blocking), U fountain (blocking), W well (blocking),
+// t statue (blocking), f flowers (walkable decor).
+// Blocking set = CFG.BLOCKING_GLYPHS ('#TUWt'); everything else is walkable.
+//
+// Zone sketch:
+//   NW corner ......... margin patch A (6 tiles) over the lawn
+//   N-center .......... path spine running down from the north hedge
+//   NE corner ......... orchard: 2x3 grid of trees with grass aisles
+//   W side ............ shrine #1 (x6,y5) with flower bed, well (x4,y7)
+//                       beside the spawn path
+//   Center ............ fountain plaza: broad path apron (x10..14,y6..9)
+//                       around the fountain (x12,y7) + statue (x13,y7) pair
+//   Row 8 ............. the main east-west promenade, border to border
+//   E side ............ shrine #2 (x18,y10) with flower bed
+//   SW corner ......... margin patch C (6 tiles)
+//   SE corner ......... margin patch B (6 tiles)
+//
+// Reachability hand-verified by BFS during authoring (see audit): all 299
+// non-blocking tiles are reachable from S at (2,8) — the promenade touches
+// every zone, and no decor placement seals off a region.
 // ----------------------------------------------------------------------------
 const MAP = [
-  '###############',
-  '#....#....#...#',
-  '#.##.#.##.#.#.#',
-  '#.#..,,,..#.#.#',
-  '#.#.##.##.#.#.#',
-  '#.#.......#...#',
-  '#.#.#####.###.#',
-  '#.#.#...#.....#',
-  '#...#.+.#.###.#',
-  '#.###.#.#.#...#',
-  '#.....#.#.#.#.#',
-  '#.###.#.#.#.#.#',
-  '#.#,,,.#...#..#',
-  '#.#...#.####.S#',
-  '###############',
+  '########################',
+  "#,,,''''''''.''''T'T'T'#",
+  "#,,,''''''''.''''''''''#",
+  "#'''''''''''.''''T'T'T'#",
+  "#'''''''''''.''''''''''#",
+  "#'''''+f''''.''''''''''#",
+  "#'''''.f''.....''''''''#",
+  "#'.fW'.'''..Ut.''''''''#",
+  '#.Sf...................#',
+  "#'''''''''.....''f.''''#",
+  "#'''''''''''.''''f+''''#",
+  "#'''''''''''.''''''''''#",
+  "#'''''''''''.''''''''''#",
+  "#,,,''''''''.'''''',,,'#",
+  "#,,,''''''''.'''''',,,'#",
+  '########################',
 ];
+
+// The one walkability test — every collision check goes through this.
+const isBlockedGlyph = (ch) => CFG.BLOCKING_GLYPHS.includes(ch);
 
 const SPAWN = (() => {
   for (let y = 0; y < MAP.length; y++) {
@@ -115,6 +186,10 @@ const SPAWN = (() => {
 })();
 
 const OUTER_WIDTH = CFG.MAP_COLS * CFG.TILE_SIZE + 40;
+
+// Battle entities render slightly larger than their tile (Task: presence).
+const ENT_SIZE = Math.round(CFG.BTILE * CFG.FX.ENTITY_SCALE);
+const ENT_OFF = Math.round((CFG.BTILE - ENT_SIZE) / 2);
 
 // ----------------------------------------------------------------------------
 // Small pure helpers
@@ -130,11 +205,7 @@ const DIR_VECTORS = {
 };
 
 function pickSpecies() {
-  const table = [
-    ['Drollery', CFG.ENEMIES.Drollery.weight],
-    ['Grotesque', CFG.ENEMIES.Grotesque.weight],
-    ['Basilisk', CFG.ENEMIES.Basilisk.weight],
-  ];
+  const table = Object.entries(CFG.ENEMIES).map(([name, e]) => [name, e.weight]);
   let r = Math.random();
   for (const [name, w] of table) {
     if (r < w) return name;
@@ -152,8 +223,79 @@ function actionFromKey(e) {
     case 'z': case 'Z': return 'z';
     case 'x': case 'X': return 'x';
     case 'c': case 'C': return 'c';
+    case 'm': case 'M': return 'mute';
     case 'Tab': return 'tab';
     default: return null;
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Sound — a tiny WebAudio synth. The AudioContext is created lazily inside the
+// click-to-begin handler (a user gesture) via initAudio(); if creation fails,
+// sfx() is a permanent no-op. Audio NEVER drives gameplay timing: every call
+// is fire-and-forget from game-logic sites in the rAF loop's call tree.
+// Mute state lives in G.muted (HUD reads it); sfxSetMuted mirrors it here so
+// the module-level sfx() doesn't need the game ref threaded through.
+// ----------------------------------------------------------------------------
+let sfxCtx = null;
+let sfxFailed = false;
+let sfxMuted = false;
+
+function initAudio() {
+  if (sfxCtx || sfxFailed) {
+    // Some browsers hand back a suspended context; a later gesture may resume it.
+    if (sfxCtx && sfxCtx.state === 'suspended') sfxCtx.resume().catch(() => {});
+    return;
+  }
+  try {
+    const Ctor = window.AudioContext || window.webkitAudioContext;
+    if (!Ctor) { sfxFailed = true; return; }
+    sfxCtx = new Ctor();
+  } catch {
+    sfxFailed = true;
+    sfxCtx = null;
+  }
+}
+
+function sfxSetMuted(muted) {
+  sfxMuted = muted;
+}
+
+function sfx(name) {
+  if (!sfxCtx || sfxMuted) return;
+  const def = CFG.SFX[name];
+  if (!def) return;
+  try {
+    const t0 = sfxCtx.currentTime + 0.001;
+    if (def.slide) {
+      // One oscillator sweeping freqs[0] -> freqs[1] over dur.
+      const osc = sfxCtx.createOscillator();
+      const g = sfxCtx.createGain();
+      osc.type = def.type;
+      osc.frequency.setValueAtTime(def.freqs[0], t0);
+      osc.frequency.exponentialRampToValueAtTime(Math.max(1, def.freqs[1]), t0 + def.dur);
+      g.gain.setValueAtTime(def.gain, t0);
+      g.gain.exponentialRampToValueAtTime(0.001, t0 + def.dur);
+      osc.connect(g).connect(sfxCtx.destination);
+      osc.start(t0);
+      osc.stop(t0 + def.dur + 0.02);
+    } else {
+      // Sequential notes, each dur long with a quick decay envelope.
+      def.freqs.forEach((freq, i) => {
+        const nt = t0 + i * def.dur;
+        const osc = sfxCtx.createOscillator();
+        const g = sfxCtx.createGain();
+        osc.type = def.type;
+        osc.frequency.setValueAtTime(freq, nt);
+        g.gain.setValueAtTime(def.gain, nt);
+        g.gain.exponentialRampToValueAtTime(0.001, nt + def.dur);
+        osc.connect(g).connect(sfxCtx.destination);
+        osc.start(nt);
+        osc.stop(nt + def.dur + 0.02);
+      });
+    }
+  } catch {
+    // Never let audio problems touch gameplay.
   }
 }
 
@@ -177,6 +319,7 @@ function makeInitialGame() {
     },
     party: [{ species: 'Quill', hp: CFG.FAMILIARS.Quill.hp, maxHp: CFG.FAMILIARS.Quill.hp }],
     bestiary: new Set(), // unique species successfully bound
+    muted: false, // sfx mute toggle (M key); mirrored into the sfx module
     battle: null,
     transitionStage: null, // 'flash1' | 'off1' | 'flash2' | 'wipe'
     timeouts: [], // pending setTimeout ids (TRANSITION/RESULT sequencing only)
@@ -249,10 +392,26 @@ function resolveCollisions(G) {
   B.projectiles = remaining;
 }
 
+// Floating damage numbers — short-lived effect records ticked/pruned every
+// frame in stepBattleEffects. Hard-capped so the array can never grow unbounded.
+let dmgNumIdCounter = 0;
+
+function pushDamageNumber(G, col, row, amount, kind) {
+  const B = G.battle;
+  B.damageNumbers.push({ id: ++dmgNumIdCounter, col, row, amount: Math.round(amount), kind, t: 0 });
+  while (B.damageNumbers.length > CFG.FX.DMG_NUM_MAX) B.damageNumbers.shift();
+}
+
 function applyDamageToEnemy(G, dmg) {
   const B = G.battle;
+  // Snail-Knight in its shell only takes a fraction of any incoming damage.
+  if (B.enemySpecies === 'Snail-Knight' && B.enemy.shelled) {
+    dmg *= CFG.ENEMIES['Snail-Knight'].shellDmgFactor;
+  }
   B.enemy.hp = Math.max(0, B.enemy.hp - dmg);
   B.enemy.hitFlashTimer = CFG.HIT_FLASH_MS / 1000;
+  pushDamageNumber(G, B.enemy.col, B.enemy.row, dmg, 'dealt');
+  sfx('enemyHit');
 }
 
 function applyDamageToPlayer(G, dmg) {
@@ -262,6 +421,9 @@ function applyDamageToPlayer(G, dmg) {
   if (active.hp <= 0) return; // already down, no double-dipping
   active.hp = Math.max(0, active.hp - dmg);
   B.iframeTimer = CFG.IFRAME_MS / 1000;
+  pushDamageNumber(G, B.playerCol, B.playerRow, dmg, 'taken');
+  B.shakeTimer = CFG.FX.SHAKE_MS / 1000; // screen shake on player damage only
+  sfx('playerHit');
   if (active.hp <= 0) {
     // Auto-swap to the next living member (if any); defeat is decided by
     // checkBattleEnd once ALL party members are down.
@@ -298,7 +460,15 @@ function attemptBind(G) {
   const t = clamp((thresholdHp - hp) / span, 0, 1);
   const chance = CFG.BIND_MIN_CHANCE + t * (CFG.BIND_MAX_CHANCE - CFG.BIND_MIN_CHANCE);
 
-  if (Math.random() < chance) {
+  sfx('bindTry');
+  const success = Math.random() < chance;
+  // Seal-stamp effect on the enemy tile: scales in over BIND_STAMP_IN_MS, then
+  // holds until RESULT on success or cracks apart on failure. Ticked in
+  // stepBattleEffects (which also runs during RESULT, so the scale-in
+  // completes even though gameplay freezes the instant a bind succeeds).
+  B.bindStamp = { t: 0, state: 'in', success };
+
+  if (success) {
     G.bestiary.add(B.enemySpecies);
     let partyFull = false;
     if (G.party.length < CFG.PARTY_MAX) {
@@ -307,10 +477,12 @@ function attemptBind(G) {
     } else {
       partyFull = true;
     }
+    sfx('bindSuccess');
     enterResult(G, 'BOUND', { species: B.enemySpecies, partyFull });
   } else {
     // Riled: fire interval reduced 25%, Bind goes on cooldown.
     enemy.riled = true;
+    enemy.bindFailFlashTimer = CFG.FX.BIND_FAIL_FLASH_MS / 1000; // vermilion flash
     B.bindCdTimer = CFG.BIND_FAIL_CD;
   }
 }
@@ -373,6 +545,7 @@ function stepGrotesque(G, dt) {
   if (!enemy.telegraphActive && enemy.col === 3 && enemy.swipeCdTimer <= 0) {
     enemy.telegraphActive = true;
     enemy.telegraphTimer = 0;
+    sfx('telegraph');
   }
 
   if (enemy.telegraphActive) {
@@ -409,12 +582,75 @@ function stepBasilisk(G, dt) {
   const telegraphStart = enemy.nextFireInterval - base.telegraphMs / 1000;
   if (!enemy.telegraphActive && enemy.fireTimer >= telegraphStart) {
     enemy.telegraphActive = true;
+    sfx('telegraph');
   }
   if (enemy.fireTimer >= enemy.nextFireInterval) {
     spawnProjectile(G, 'enemy', enemy.col - 1, enemy.row, base.boltSpeed, base.boltDmg);
     enemy.fireTimer = 0;
     enemy.telegraphActive = false;
     enemy.nextFireInterval = rand(base.fireMin, base.fireMax) * (enemy.riled ? CFG.BIND_RILE_FACTOR : 1);
+  }
+}
+
+// Snail-Knight: an armored siege unit on a shell cycle — exposedMs out of the
+// shell, then shelledMs withdrawn (incoming damage x shellDmgFactor, rendered
+// smaller/desaturated). While exposed it slowly chases the player's row, and
+// when its lance is off cooldown it telegraphs the player-side half of its
+// current row for telegraphMs, dashes to its front column (3), and strikes
+// the two nearest player tiles in that row (cols 2 and 1) for lanceDmg —
+// a single hit at most, gated by the usual i-frames. The shell cycle pauses
+// during the lance so the charge always lands from the exposed state.
+function stepSnailKnight(G, dt) {
+  const B = G.battle;
+  const enemy = B.enemy;
+  const base = CFG.ENEMIES['Snail-Knight'];
+
+  // --- shell cycle (paused mid-lance) ---
+  if (!enemy.telegraphActive) {
+    enemy.shellTimer += dt;
+    if (!enemy.shelled && enemy.shellTimer >= base.exposedMs / 1000) {
+      enemy.shelled = true;
+      enemy.shellTimer = 0;
+    } else if (enemy.shelled && enemy.shellTimer >= base.shelledMs / 1000) {
+      enemy.shelled = false;
+      enemy.shellTimer = 0;
+    }
+  }
+
+  // --- ponderous movement: chase the player's row while exposed ---
+  enemy.moveTimer += dt;
+  if (enemy.moveTimer >= base.moveIntervalMs / 1000) {
+    enemy.moveTimer = 0;
+    if (!enemy.shelled && !enemy.telegraphActive) {
+      if (enemy.row < B.playerRow) enemy.row++;
+      else if (enemy.row > B.playerRow) enemy.row--;
+      else enemy.col = clamp(enemy.col + [-1, 1][Math.floor(Math.random() * 2)], 3, 5);
+    }
+  }
+
+  // --- lance charge: only initiates while exposed ---
+  enemy.lanceCdTimer = Math.max(0, enemy.lanceCdTimer - dt);
+  if (!enemy.telegraphActive && !enemy.shelled && enemy.lanceCdTimer <= 0) {
+    enemy.telegraphActive = true;
+    enemy.telegraphTimer = 0;
+    enemy.lanceRow = enemy.row; // row locks when the telegraph begins
+    sfx('telegraph');
+  }
+
+  if (enemy.telegraphActive) {
+    enemy.telegraphTimer += dt;
+    if (enemy.telegraphTimer >= base.telegraphMs / 1000) {
+      enemy.telegraphActive = false;
+      enemy.lanceCdTimer = base.lanceCdS * (enemy.riled ? CFG.BIND_RILE_FACTOR : 1);
+      enemy.col = 3; // the dash to the front column
+      enemy.row = enemy.lanceRow;
+      // Strike the two nearest player tiles in the row: cols 2 and 1. One hit
+      // max by construction (the player occupies a single tile), and
+      // applyDamageToPlayer respects i-frames.
+      if (B.playerRow === enemy.lanceRow && (B.playerCol === 2 || B.playerCol === 1)) {
+        applyDamageToPlayer(G, base.lanceDmg);
+      }
+    }
   }
 }
 
@@ -434,6 +670,9 @@ function enterResult(G, reason, extra) {
   G.battle.resultReason = reason;
   G.battle.resultExtra = extra;
   G.phase = 'RESULT';
+  if (reason === 'SUBDUED') sfx('victory');
+  else if (reason === 'DEFEAT') sfx('defeat');
+  // BOUND already played bindSuccess at the attemptBind site.
   scheduleTimeout(G, () => finalizeResult(G), CFG.RESULT_MS);
 }
 
@@ -465,9 +704,10 @@ function tryStep(G, dir) {
   const ny = OW.playerY + dy;
   if (ny < 0 || ny >= CFG.MAP_ROWS || nx < 0 || nx >= CFG.MAP_COLS) return;
   const tile = MAP[ny][nx];
-  if (tile === '#') return; // blocked by hedge/wall
+  if (isBlockedGlyph(tile)) return; // hedge, tree, fountain, well, statue
   OW.playerX = nx;
   OW.playerY = ny;
+  sfx('step');
   if (tile === '+') healParty(G);
   else if (tile === ',') rollEncounter(G);
 }
@@ -486,6 +726,7 @@ function startEncounter(G, species) {
   G.overworld.returnY = G.overworld.playerY;
   G.phase = 'TRANSITION';
   G.transitionStage = 'flash1';
+  sfx('encounter');
   scheduleTimeout(G, () => { G.transitionStage = 'off1'; }, 90);
   scheduleTimeout(G, () => { G.transitionStage = 'flash2'; }, 170);
   scheduleTimeout(G, () => { G.transitionStage = 'wipe'; }, 260);
@@ -509,6 +750,12 @@ function startBattle(G, species) {
       telegraphTimer: 0,
       swipeCdTimer: 0,
       hitFlashTimer: 0,
+      // Snail-Knight shell/lance state (inert for other species)
+      shelled: false,
+      shellTimer: 0,
+      lanceCdTimer: species === 'Snail-Knight' ? CFG.ENEMIES[species].lanceCdS : 0,
+      lanceRow: 1,
+      bindFailFlashTimer: 0,
     },
     activeIndex: firstLivingIndex(G.party),
     playerCol: 1,
@@ -522,6 +769,12 @@ function startBattle(G, species) {
     slashFlashTimer: 0,
     slashFlashTiles: [],
     projectiles: [],
+    // short-lived visual effect records — ticked & pruned in stepBattleEffects
+    damageNumbers: [],
+    shakeTimer: 0,
+    shakeX: 0,
+    shakeY: 0,
+    bindStamp: null, // { t, state: 'in'|'hold'|'crack', success }
     resultReason: null,
     resultExtra: null,
   };
@@ -572,7 +825,8 @@ function stepBattle(G, dt) {
   B.swapCdTimer = Math.max(0, B.swapCdTimer - dt);
   B.iframeTimer = Math.max(0, B.iframeTimer - dt);
   B.slashFlashTimer = Math.max(0, B.slashFlashTimer - dt);
-  B.enemy.hitFlashTimer = Math.max(0, B.enemy.hitFlashTimer - dt);
+  // (hit-flash / shake / damage-number / bind-stamp timers tick in
+  // stepBattleEffects, which also runs during RESULT so effects settle.)
 
   const held = G.input.held;
   const pressed = G.input.pressed;
@@ -603,6 +857,7 @@ function stepBattle(G, dt) {
   if (pressed.has('z') && B.boltCdTimer <= 0) {
     spawnProjectile(G, 'player', B.playerCol + 1, B.playerRow, activeStats.boltSpeed, activeStats.boltDmg);
     B.boltCdTimer = activeStats.boltCd;
+    sfx('bolt');
   }
 
   // --- X: Marginal Slash (1x3 vertical column at playerCol+1) ---
@@ -615,6 +870,7 @@ function stepBattle(G, dt) {
       applyDamageToEnemy(G, CFG.SLASH_DMG);
     }
     B.slashCdTimer = CFG.SLASH_CD;
+    sfx('slash');
   }
 
   // --- C: Bind (only once enemy hp <= 30%) ---
@@ -636,11 +892,55 @@ function stepBattle(G, dt) {
     if (B.enemySpecies === 'Drollery') stepDrollery(G, dt);
     else if (B.enemySpecies === 'Grotesque') stepGrotesque(G, dt);
     else if (B.enemySpecies === 'Basilisk') stepBasilisk(G, dt);
+    else if (B.enemySpecies === 'Snail-Knight') stepSnailKnight(G, dt);
   }
 
   // --- collisions, then check for battle-ending conditions ---
   resolveCollisions(G);
   checkBattleEnd(G);
+}
+
+// ----------------------------------------------------------------------------
+// Battle-feel effect ticker. Runs every frame while a battle object exists —
+// during BATTLE *and* RESULT (gameplay freezes at RESULT but effects like the
+// bind stamp's scale-in and a lingering shake should still settle). Every
+// array here is pruned each frame, so nothing grows unbounded.
+// ----------------------------------------------------------------------------
+function stepBattleEffects(G, dt) {
+  const B = G.battle;
+  if (!B) return;
+
+  // floating damage numbers: age, then prune expired
+  for (const d of B.damageNumbers) d.t += dt;
+  B.damageNumbers = B.damageNumbers.filter((d) => d.t < CFG.FX.DMG_NUM_MS / 1000);
+
+  // enemy flash timers
+  B.enemy.hitFlashTimer = Math.max(0, B.enemy.hitFlashTimer - dt);
+  B.enemy.bindFailFlashTimer = Math.max(0, B.enemy.bindFailFlashTimer - dt);
+
+  // screen shake: random offset each frame, magnitude decaying to zero
+  if (B.shakeTimer > 0) {
+    B.shakeTimer = Math.max(0, B.shakeTimer - dt);
+    const mag = CFG.FX.SHAKE_MAX_PX * (B.shakeTimer / (CFG.FX.SHAKE_MS / 1000));
+    B.shakeX = rand(-mag, mag);
+    B.shakeY = rand(-mag, mag);
+  } else {
+    B.shakeX = 0;
+    B.shakeY = 0;
+  }
+
+  // bind stamp lifecycle: in -> hold (success, until RESULT ends the battle)
+  //                       in -> crack -> gone (failure)
+  const st = B.bindStamp;
+  if (st) {
+    st.t += dt;
+    if (st.state === 'in' && st.t >= CFG.FX.BIND_STAMP_IN_MS / 1000) {
+      st.state = st.success ? 'hold' : 'crack';
+      st.t = 0;
+    } else if (st.state === 'crack' && st.t >= CFG.FX.BIND_STAMP_CRACK_MS / 1000) {
+      B.bindStamp = null;
+    }
+  }
 }
 
 // ============================================================================
@@ -681,13 +981,28 @@ function Sprite({ name, style }) {
 // ============================================================================
 // Small presentational helpers
 // ============================================================================
+
+// Decor glyphs: each renders as grass underneath plus an optional sprite over
+// a simple CSS-shape fallback (circle/rect in ink tones). Walkability is NOT
+// decided here — that's CFG.BLOCKING_GLYPHS via isBlockedGlyph.
+const DECOR = {
+  T: { sprite: 'tree', shape: 'circle', color: '#57603F', size: 0.85 },
+  U: { sprite: 'fountain', shape: 'circle', color: '#44506B', size: 0.85 },
+  W: { sprite: 'well', shape: 'circle', color: '#4A4036', size: 0.7 },
+  t: { sprite: 'statue', shape: 'rect', color: '#6E675C', size: 0.6 },
+  f: { sprite: 'flowers', shape: 'circle', color: '#B65C40', size: 0.4 },
+};
+
 function tileStyle(ch) {
   const base = { width: CFG.TILE_SIZE, height: CFG.TILE_SIZE };
+  if (DECOR[ch]) return { ...base, background: CFG.COLORS.grass }; // decor sits on grass
   switch (ch) {
     case '#':
       return { ...base, background: CFG.COLORS.ink, boxShadow: 'inset 0 0 4px rgba(0,0,0,0.6)' };
     case '+':
       return { ...base, background: CFG.COLORS.gold, boxShadow: 'inset 0 0 8px rgba(0,0,0,0.35)' };
+    case "'":
+      return { ...base, background: CFG.COLORS.grass };
     case ',':
       return {
         ...base,
@@ -700,6 +1015,24 @@ function tileStyle(ch) {
   }
 }
 
+// CSS-shape fallback for a decor glyph — always painted; the PNG (when it
+// exists) simply renders on top of it, same layering as every entity square.
+function DecorShape({ def }) {
+  const pad = ((1 - def.size) / 2) * 100;
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        inset: `${pad}%`,
+        background: def.color,
+        borderRadius: def.shape === 'circle' ? '50%' : 2,
+        border: '1px solid rgba(28,24,18,0.55)',
+        boxSizing: 'border-box',
+      }}
+    />
+  );
+}
+
 function battleTileHighlight(G, col, row) {
   const B = G.battle;
   const out = [];
@@ -707,6 +1040,8 @@ function battleTileHighlight(G, col, row) {
   if (B.enemy.hp > 0 && B.enemy.telegraphActive) {
     if (B.enemySpecies === 'Grotesque' && col === 2 && row === B.enemy.row) out.push('telegraph');
     if (B.enemySpecies === 'Basilisk' && row === B.enemy.row) out.push('telegraph');
+    // Snail-Knight lance: glows the player-side half of its locked row.
+    if (B.enemySpecies === 'Snail-Knight' && col < 3 && row === B.enemy.lanceRow) out.push('telegraph');
   }
   return out;
 }
@@ -720,34 +1055,76 @@ function resultText(reason, extra) {
   return '';
 }
 
+// Shared "ink on parchment" chip styling for every HUD surface.
+const HUD_FONT = 'Georgia, "Times New Roman", serif';
+const HUD_CHIP = {
+  background: 'rgba(232,220,196,0.88)',
+  color: CFG.COLORS.ink,
+  border: `1px solid ${CFG.COLORS.ink}`,
+  borderRadius: 4,
+  fontFamily: HUD_FONT,
+  fontSize: 12,
+};
+
 function PartyChips({ party, activeIndex }) {
   return (
-    <div style={{ display: 'flex', gap: 4 }}>
-      {party.map((p, i) => (
-        <div
-          key={i}
-          title={p.species}
-          style={{
-            width: 18,
-            height: 18,
-            position: 'relative',
-            background: CFG.FAMILIARS[p.species].color,
-            border: i === activeIndex ? `2px solid ${CFG.COLORS.gold}` : '1px solid #1c1812',
-            opacity: p.hp <= 0 ? 0.3 : 1,
-          }}
-        >
+    <div style={{ display: 'flex', gap: 5 }}>
+      {party.map((p, i) => {
+        const fainted = p.hp <= 0;
+        return (
           <div
+            key={i}
+            title={p.species}
             style={{
-              position: 'absolute',
-              left: 0,
-              bottom: 0,
-              height: 3,
-              width: `${Math.max(0, p.hp / p.maxHp) * 100}%`,
-              background: CFG.COLORS.gold,
+              width: 18,
+              height: 18,
+              position: 'relative',
+              backgroundColor: CFG.FAMILIARS[p.species].color, // longhand, see HpBar
+              // crosshatch fainted chips instead of just fading them out
+              backgroundImage: fainted
+                ? 'repeating-linear-gradient(45deg, rgba(28,24,18,0.65) 0, rgba(28,24,18,0.65) 2px, transparent 2px, transparent 5px)'
+                : 'none',
+              border: '1px solid #1c1812',
+              borderRadius: 3,
+              // gilt ring on the active chip (ring, not border, so size is stable)
+              boxShadow: i === activeIndex ? `0 0 0 2px ${CFG.COLORS.gold}` : 'none',
+              opacity: fainted ? 0.45 : 1,
+              overflow: 'hidden',
             }}
-          />
-        </div>
-      ))}
+          >
+            <div
+              style={{
+                position: 'absolute',
+                left: 0,
+                bottom: 0,
+                height: 3,
+                width: `${Math.max(0, p.hp / p.maxHp) * 100}%`,
+                background: CFG.COLORS.gold,
+              }}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Small corner indicator: ♪ when sound is on, struck-through when muted.
+function MuteBadge({ muted, style }) {
+  return (
+    <div
+      title="M toggles sound"
+      style={{
+        ...HUD_CHIP,
+        position: 'absolute',
+        padding: '2px 7px',
+        zIndex: 5,
+        opacity: muted ? 0.6 : 0.9,
+        textDecoration: muted ? 'line-through' : 'none',
+        ...style,
+      }}
+    >
+      ♪{muted ? ' off' : ''}
     </div>
   );
 }
@@ -755,27 +1132,41 @@ function PartyChips({ party, activeIndex }) {
 function Hud({ G }) {
   const lead = G.party[0];
   return (
-    <div
-      style={{
-        position: 'absolute',
-        top: 6,
-        left: 6,
-        background: 'rgba(232,220,196,0.88)',
-        color: CFG.COLORS.ink,
-        padding: '6px 10px',
-        borderRadius: 4,
-        fontSize: 12,
-        lineHeight: 1.5,
-        zIndex: 5,
-        border: `1px solid ${CFG.COLORS.ink}`,
-      }}
-    >
-      <div style={{ fontWeight: 'bold' }}>Bestiary: {G.bestiary.size}/{CFG.TOTAL_SPECIES}</div>
-      <div>{lead.species}: {Math.ceil(lead.hp)}/{lead.maxHp} HP</div>
-      <div style={{ marginTop: 3 }}>
-        <PartyChips party={G.party} activeIndex={0} />
+    <>
+      <div
+        style={{
+          ...HUD_CHIP,
+          position: 'absolute',
+          top: 6,
+          left: 6,
+          padding: '6px 10px',
+          lineHeight: 1.5,
+          zIndex: 5,
+        }}
+      >
+        <div style={{ fontWeight: 'bold' }}>Bestiary: {G.bestiary.size}/{CFG.TOTAL_SPECIES}</div>
+        <div>{lead.species}: {Math.ceil(lead.hp)}/{lead.maxHp} HP</div>
+        <div style={{ marginTop: 4 }}>
+          <PartyChips party={G.party} activeIndex={0} />
+        </div>
       </div>
-    </div>
+      {/* area label — small-caps serif, top-right */}
+      <div
+        style={{
+          ...HUD_CHIP,
+          position: 'absolute',
+          top: 6,
+          right: 6,
+          padding: '4px 10px',
+          fontVariant: 'small-caps',
+          letterSpacing: 1,
+          zIndex: 5,
+        }}
+      >
+        {CFG.AREA_NAME}
+      </div>
+      <MuteBadge muted={G.muted} style={{ bottom: 6, right: 6 }} />
+    </>
   );
 }
 
@@ -819,7 +1210,7 @@ function StartOverlay({ onStart }) {
       )}
       <div style={{ fontSize: 16, color: CFG.COLORS.parchment }}>Click to begin</div>
       <div style={{ fontSize: 12, color: CFG.COLORS.parchment, opacity: 0.7, marginTop: 10, maxWidth: 320 }}>
-        Arrows/WASD move · Z bolt · X slash · C bind · Tab swap familiar
+        Arrows/WASD move · Z bolt · X slash · C bind · Tab swap familiar · M mute
       </div>
     </div>
   );
@@ -828,18 +1219,30 @@ function StartOverlay({ onStart }) {
 function HpBar({ label, hp, maxHp, color, align }) {
   const pct = (Math.max(0, hp) / maxHp) * 100;
   return (
-    <div style={{ width: 190, textAlign: align === 'right' ? 'right' : 'left' }}>
+    <div style={{ width: 190, textAlign: align === 'right' ? 'right' : 'left', fontFamily: HUD_FONT }}>
       <div style={{ fontSize: 12, marginBottom: 2 }}>{label} {Math.max(0, Math.ceil(hp))}/{maxHp}</div>
       <div
         style={{
           height: 10,
           background: '#1c1812',
-          border: '1px solid #000',
+          border: `1px solid ${CFG.COLORS.ink}`,
+          borderRadius: 5,
+          overflow: 'hidden',
           display: 'flex',
           justifyContent: align === 'right' ? 'flex-end' : 'flex-start',
         }}
       >
-        <div style={{ height: '100%', width: `${pct}%`, background: color }} />
+        <div
+          style={{
+            height: '100%',
+            width: `${pct}%`,
+            backgroundColor: color, // longhand: avoids React shorthand/longhand style clash
+            // subtle two-stop sheen over the flat fill color
+            backgroundImage: 'linear-gradient(180deg, rgba(255,255,255,0.28), rgba(0,0,0,0.18))',
+            borderRadius: 4,
+            transition: 'width 120ms ease-out',
+          }}
+        />
       </div>
     </div>
   );
@@ -929,6 +1332,7 @@ function OverworldView({ G }) {
   for (let y = 0; y < CFG.MAP_ROWS; y++) {
     for (let x = 0; x < CFG.MAP_COLS; x++) {
       const ch = MAP[y][x];
+      const decor = DECOR[ch];
       tiles.push(
         <div
           key={`${x}-${y}`}
@@ -936,6 +1340,13 @@ function OverworldView({ G }) {
         >
           {/* shrine art layered over the gold square (which stays as fallback) */}
           {ch === '+' && <Sprite name="shrine" />}
+          {/* decor: CSS shape fallback first, sprite art painted over it */}
+          {decor && (
+            <>
+              <DecorShape def={decor} />
+              <Sprite name={decor.sprite} />
+            </>
+          )}
         </div>
       );
     }
@@ -1089,6 +1500,9 @@ function BattleView({ G, resultOverlay }) {
           width: CFG.BCOLS * CFG.BTILE + 2 * CFG.FRAME_PAD,
           margin: '0 auto',
           padding: CFG.FRAME_PAD,
+          // screen shake: offsets computed by the rAF loop (stepBattleEffects),
+          // zero outside the decaying SHAKE_MS window after player damage.
+          transform: `translate(${B.shakeX || 0}px, ${B.shakeY || 0}px)`,
         }}
       >
         <Sprite name="parchment" style={{ objectFit: 'cover' }} />
@@ -1115,39 +1529,84 @@ function BattleView({ G, resultOverlay }) {
           }}
         />
 
-        {/* player familiar */}
+        {/* player familiar — outer div positions + idle-bobs (pure cosmetic
+            CSS keyframes), inner div carries the fallback square, border and
+            drop-shadow. Rendered at ENTITY_SCALE of the tile for presence. */}
         <div
           style={{
             position: 'absolute',
-            width: CFG.BTILE - 8,
-            height: CFG.BTILE - 8,
-            left: B.playerCol * CFG.BTILE + 4,
-            top: B.playerRow * CFG.BTILE + 4,
-            background: activeStats.color,
-            border: '2px solid #1c1812',
-            boxSizing: 'border-box',
+            width: ENT_SIZE,
+            height: ENT_SIZE,
+            left: B.playerCol * CFG.BTILE + ENT_OFF,
+            top: B.playerRow * CFG.BTILE + ENT_OFF,
             opacity: B.iframeTimer > 0 && Math.floor(B.iframeTimer * 10) % 2 === 0 ? 0.35 : 1,
+            animation: `inkbound-bob ${CFG.FX.BOB_S}s ease-in-out infinite`,
+            zIndex: 2,
+            pointerEvents: 'none',
           }}
         >
-          <Sprite name={activeMember.species.toLowerCase()} />
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              background: activeStats.color,
+              border: '2px solid #1c1812',
+              boxSizing: 'border-box',
+              filter: 'drop-shadow(0 5px 6px rgba(20,16,12,0.4))',
+            }}
+          >
+            <Sprite name={activeMember.species.toLowerCase()} />
+          </div>
         </div>
 
-        {/* wild enemy */}
+        {/* wild enemy — same outer/inner split; the bob is phase-offset via a
+            negative animation-delay so the pair don't move in lockstep. */}
         {B.enemy.hp > 0 && (
           <div
             style={{
               position: 'absolute',
-              width: CFG.BTILE - 8,
-              height: CFG.BTILE - 8,
-              left: B.enemy.col * CFG.BTILE + 4,
-              top: B.enemy.row * CFG.BTILE + 4,
-              background: CFG.COLORS.vermilion,
-              border: '2px solid #1c1812',
-              boxSizing: 'border-box',
-              filter: B.enemy.hitFlashTimer > 0 ? 'brightness(1.8)' : 'none',
+              width: ENT_SIZE,
+              height: ENT_SIZE,
+              left: B.enemy.col * CFG.BTILE + ENT_OFF,
+              top: B.enemy.row * CFG.BTILE + ENT_OFF,
+              animation: `inkbound-bob ${CFG.FX.BOB_S}s ease-in-out infinite`,
+              animationDelay: `-${CFG.FX.BOB_S / 2}s`,
+              zIndex: 2,
+              pointerEvents: 'none',
             }}
           >
-            <Sprite name={B.enemySpecies.toLowerCase()} />
+            <div
+              style={{
+                position: 'absolute',
+                inset: 0,
+                background: CFG.COLORS.vermilion,
+                border: '2px solid #1c1812',
+                boxSizing: 'border-box',
+                // withdrawn shell: smaller + desaturated; hit flash brightens
+                transform: B.enemy.shelled ? 'scale(0.8)' : 'scale(1)',
+                transition: 'transform 150ms ease, filter 150ms ease',
+                filter: [
+                  B.enemy.shelled ? 'grayscale(0.85)' : '',
+                  B.enemy.hitFlashTimer > 0 ? 'brightness(1.8)' : '',
+                  'drop-shadow(0 5px 6px rgba(20,16,12,0.4))',
+                ].filter(Boolean).join(' '),
+                // riled tell: pulsing vermilion glow
+                animation: B.enemy.riled ? 'inkbound-rile 0.9s ease-in-out infinite' : 'none',
+              }}
+            >
+              <Sprite name={B.enemySpecies.toLowerCase()} />
+              {/* vermilion flash after a failed bind */}
+              {B.enemy.bindFailFlashTimer > 0 && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    inset: 0,
+                    background: CFG.COLORS.vermilion,
+                    opacity: (B.enemy.bindFailFlashTimer / (CFG.FX.BIND_FAIL_FLASH_MS / 1000)) * 0.75,
+                  }}
+                />
+              )}
+            </div>
           </div>
         )}
 
@@ -1164,15 +1623,92 @@ function BattleView({ G, resultOverlay }) {
               borderRadius: p.owner === 'player' ? 3 : 8,
               background: p.owner === 'player' ? CFG.COLORS.gold : CFG.COLORS.vermilion,
               boxShadow: '0 1px 3px rgba(0,0,0,0.6)',
+              zIndex: 3, // above entities, as before the entity restructure
             }}
           />
         ))}
+
+        {/* bind seal stamp on the enemy tile: scales in, then holds (success,
+            until RESULT) or cracks apart (failure). Timers live in B.bindStamp,
+            ticked by stepBattleEffects. Vermilion circle doubles as the
+            zero-asset fallback under the seal-bound art. */}
+        {B.bindStamp && (() => {
+          const st = B.bindStamp;
+          let scale = 1;
+          let opacity = 1;
+          let rotate = -8;
+          if (st.state === 'in') {
+            scale = Math.min(1, st.t / (CFG.FX.BIND_STAMP_IN_MS / 1000));
+          } else if (st.state === 'crack') {
+            const k = Math.min(1, st.t / (CFG.FX.BIND_STAMP_CRACK_MS / 1000));
+            opacity = 1 - k;
+            rotate = -8 + k * 70;
+            scale = 1 + k * 0.35;
+          }
+          return (
+            <div
+              style={{
+                position: 'absolute',
+                left: B.enemy.col * CFG.BTILE,
+                top: B.enemy.row * CFG.BTILE,
+                width: CFG.BTILE,
+                height: CFG.BTILE,
+                transform: `scale(${scale}) rotate(${rotate}deg)`,
+                opacity,
+                zIndex: 4,
+                pointerEvents: 'none',
+              }}
+            >
+              <div
+                style={{
+                  position: 'absolute',
+                  inset: '12%',
+                  borderRadius: '50%',
+                  background: 'rgba(193,68,14,0.8)',
+                  border: '2px solid rgba(28,24,18,0.6)',
+                }}
+              />
+              <Sprite name="seal-bound" />
+            </div>
+          );
+        })()}
+
+        {/* floating damage numbers: gilt gold for damage dealt, vermilion for
+            damage taken; rise and fade over their DMG_NUM_MS lifetime. */}
+        {B.damageNumbers.map((d) => {
+          const k = Math.min(1, d.t / (CFG.FX.DMG_NUM_MS / 1000));
+          return (
+            <div
+              key={d.id}
+              style={{
+                position: 'absolute',
+                left: d.col * CFG.BTILE,
+                top: d.row * CFG.BTILE,
+                width: CFG.BTILE,
+                textAlign: 'center',
+                transform: `translateY(${-k * CFG.FX.DMG_NUM_RISE_PX}px)`,
+                opacity: 1 - k,
+                color: d.kind === 'dealt' ? CFG.COLORS.gold : CFG.COLORS.vermilion,
+                fontFamily: HUD_FONT,
+                fontWeight: 'bold',
+                fontSize: 18,
+                textShadow: '0 1px 3px rgba(20,16,12,0.85), 0 0 2px rgba(20,16,12,0.7)',
+                zIndex: 5,
+                pointerEvents: 'none',
+              }}
+            >
+              {d.amount}
+            </div>
+          );
+        })}
         </div>
       </div>
 
       <div style={{ marginTop: 10 }}>
         <AbilityBar B={B} activeStats={activeStats} bindable={bindable} />
       </div>
+
+      <MuteBadge muted={G.muted} style={{ bottom: 12, right: 8 }} />
 
       {resultOverlay && (
         <div
@@ -1281,6 +1817,14 @@ export default function Inkbound() {
       dt = Math.min(dt, 0.05); // clamp so a stalled tab doesn't cause huge jumps
 
       const G = gameRef.current;
+
+      // M: mute toggle — phase-independent, cosmetic only (audio never gates
+      // or times gameplay, so this lives outside the phase switch).
+      if (G.input.pressed.has('mute')) {
+        G.muted = !G.muted;
+        sfxSetMuted(G.muted);
+      }
+
       switch (G.phase) {
         case 'OVERWORLD':
           stepOverworld(G, dt);
@@ -1291,6 +1835,9 @@ export default function Inkbound() {
         default:
           break; // TRANSITION / RESULT: no per-frame simulation, just overlays
       }
+      // Visual-effect timers tick whenever a battle object exists (BATTLE and
+      // RESULT) so bind stamps / shakes / damage numbers settle correctly.
+      stepBattleEffects(G, dt);
 
       G.input.pressed.clear(); // one-shot buffer consumed exactly once per frame
       setTick((t) => t + 1); // sync to React state at most once per frame
@@ -1313,6 +1860,7 @@ export default function Inkbound() {
   function handleStart() {
     startedRef.current = true;
     setStarted(true);
+    initAudio(); // AudioContext needs a user gesture; this click is it
     if (wrapperRef.current) wrapperRef.current.focus();
   }
 
@@ -1340,6 +1888,18 @@ export default function Inkbound() {
         overflow: 'hidden',
       }}
     >
+      {/* purely-cosmetic CSS keyframes (idle bob, riled glow) — the only
+          animation timing NOT driven by the rAF loop, per the M3 brief */}
+      <style>{`
+        @keyframes inkbound-bob {
+          0%, 100% { transform: translateY(0); }
+          50% { transform: translateY(-${CFG.FX.BOB_PX}px); }
+        }
+        @keyframes inkbound-rile {
+          0%, 100% { box-shadow: 0 0 3px 1px rgba(193,68,14,0.45); }
+          50% { box-shadow: 0 0 14px 5px rgba(193,68,14,0.9); }
+        }
+      `}</style>
       <div
         style={{
           textAlign: 'center',

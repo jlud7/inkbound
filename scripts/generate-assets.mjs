@@ -139,6 +139,47 @@ const MANIFEST = [
       'medieval illuminated manuscript vignette of a shadowy inky beast slipping out of the ruled margin of an ' +
       'open book page, trailing splattered iron-gall ink, vermilion accents, aged parchment, dramatic lighting, no text',
   },
+  {
+    name: 'snail-knight',
+    prompt:
+      `${STYLE_PREFIX} — an armored knight-snail, a tiny helmeted knight rising from a coiled snail shell ` +
+      'couching a lance, whimsical and proud',
+  },
+  {
+    name: 'tree',
+    prompt:
+      'medieval illuminated manuscript miniature of a small orchard fruit tree with a rounded canopy, gilt-edged ' +
+      'leaves and vermilion fruit, aged parchment tones, iron-gall ink linework, vermilion and gilt accents, ' +
+      'single centered subject, plain solid light background, video-game sprite, no text',
+  },
+  {
+    name: 'fountain',
+    prompt:
+      'medieval illuminated manuscript miniature of an octagonal carved stone cloister fountain with a slender ' +
+      'central spout and rippling water, aged parchment tones, iron-gall ink linework, vermilion and gilt ' +
+      'accents, single centered subject, plain solid light background, video-game sprite, no text',
+  },
+  {
+    name: 'flowers',
+    prompt:
+      'medieval illuminated manuscript miniature of a low clump of wildflowers, vermilion blooms and indigo ' +
+      'bells among green leaves, aged parchment tones, iron-gall ink linework, vermilion and gilt accents, ' +
+      'single centered subject, plain solid light background, video-game sprite, no text',
+  },
+  {
+    name: 'well',
+    prompt:
+      'medieval illuminated manuscript miniature of a round stone well with a small wooden roof, crank beam and ' +
+      'hanging bucket, aged parchment tones, iron-gall ink linework, vermilion and gilt accents, single ' +
+      'centered subject, plain solid light background, video-game sprite, no text',
+  },
+  {
+    name: 'statue',
+    prompt:
+      'medieval illuminated manuscript miniature of a weathered stone statue of a hooded saint on a plinth, ' +
+      'moss in the folds, aged parchment tones, iron-gall ink linework, vermilion and gilt accents, single ' +
+      'centered subject, plain solid light background, video-game sprite, no text',
+  },
 ];
 
 // Sprite-type assets that should end up with transparent backgrounds via
@@ -147,6 +188,7 @@ const MANIFEST = [
 const TRANSPARENT_NAMES = [
   'scribe', 'quill', 'drollery', 'grotesque', 'basilisk',
   'shrine', 'icon-inkwell', 'icon-slash', 'icon-seal',
+  'snail-knight', 'tree', 'fountain', 'flowers', 'well', 'statue',
 ];
 
 const BG_REMOVE_MODEL = '851-labs/background-remover';
