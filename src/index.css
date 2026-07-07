@@ -1,0 +1,17 @@
+/* Tiny global reset — all real styling lives inline in Inkbound.jsx */
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: #2B2620;
+  font-family: Georgia, 'Iowan Old Style', 'Palatino Linotype', serif;
+  color: #E8DCC4;
+}
+
+#root {
+  width: 100%;
+  min-height: 100vh;
+}
