@@ -33,7 +33,10 @@ cp .env.example .env
 # then edit .env and paste your Replicate API token
 
 node scripts/generate-assets.mjs --dry-run   # prints the cost plan, makes zero network calls
-node scripts/generate-assets.mjs             # generates the 5 sprites for real
+node scripts/generate-assets.mjs             # generates the 14 assets for real
+node scripts/generate-assets.mjs --remove-bg # strips backgrounds from the sprite-type PNGs
 ```
 
 The script prints its cost estimate and aborts before making any API calls if the total would exceed `MAX_BUDGET_USD` from your `.env`. Generated PNGs are written to `public/assets/` and picked up automatically by the game (missing files just fall back to the colored squares).
+
+By default the script skips any asset whose PNG already exists in `public/assets/` (so re-runs never overwrite art); use `--only=name1,name2` to target specific assets and `--force` to regenerate existing ones.

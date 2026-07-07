@@ -34,6 +34,7 @@ const CFG = {
   BCOLS: 6,
   BROWS: 3,
   BTILE: 64,
+  FRAME_PAD: 44, // parchment/page-frame margin ring around the battle grid (px)
 
   // Player abilities (shared across familiars; per-familiar move cooldown
   // and bolt stats live in FAMILIARS below — Quill's values are the base
@@ -533,11 +534,18 @@ function stepOverworld(G, dt) {
   OW.stepTimerMs += dt * 1000;
 
   const held = G.input.held;
+  const pressed = G.input.pressed;
+  // A direction counts as active if currently held OR tapped this frame: a
+  // quick keydown+keyup landing between two rAF frames leaves `held` empty at
+  // sample time, but the one-shot `pressed` buffer still carries it — without
+  // this, discrete taps get dropped. `pressed` clears at end-of-frame, so a
+  // tap yields exactly one step; hold-to-repeat cadence is unchanged.
+  const dirDown = (d) => held.has(d) || pressed.has(d);
   let dir = null;
-  if (held.has('up')) dir = 'up';
-  else if (held.has('down')) dir = 'down';
-  else if (held.has('left')) dir = 'left';
-  else if (held.has('right')) dir = 'right';
+  if (dirDown('up')) dir = 'up';
+  else if (dirDown('down')) dir = 'down';
+  else if (dirDown('left')) dir = 'left';
+  else if (dirDown('right')) dir = 'right';
 
   if (dir) {
     if (OW.stepTimerMs >= CFG.STEP_MS) {
@@ -572,11 +580,13 @@ function stepBattle(G, dt) {
 
   // --- player movement: instant tile snap, clamped to own 3x3, cooldown-gated
   if (B.moveCdTimer <= 0) {
+    // held OR pressed: catches taps shorter than one frame (see stepOverworld).
+    const dirDown = (d) => held.has(d) || pressed.has(d);
     let dir = null;
-    if (held.has('up')) dir = 'up';
-    else if (held.has('down')) dir = 'down';
-    else if (held.has('left')) dir = 'left';
-    else if (held.has('right')) dir = 'right';
+    if (dirDown('up')) dir = 'up';
+    else if (dirDown('down')) dir = 'down';
+    else if (dirDown('left')) dir = 'left';
+    else if (dirDown('right')) dir = 'right';
     if (dir) {
       const [dx, dy] = DIR_VECTORS[dir];
       const nc = clamp(B.playerCol + dx, 0, 2); // player territory: cols 0-2
@@ -786,9 +796,27 @@ function StartOverlay({ onStart }) {
         textAlign: 'center',
       }}
     >
-      <div style={{ fontSize: 40, fontWeight: 'bold', color: CFG.COLORS.gold, marginBottom: 14, letterSpacing: 3 }}>
-        INKBOUND
-      </div>
+      {failedSprites.has('title') ? (
+        // Text fallback — only shown once the title art is known to be missing.
+        // (The rAF tick re-renders this overlay every frame, so the swap from
+        // image to text happens on the frame after the img's onError fires.)
+        <div style={{ fontSize: 40, fontWeight: 'bold', color: CFG.COLORS.gold, marginBottom: 14, letterSpacing: 3 }}>
+          INKBOUND
+        </div>
+      ) : (
+        <Sprite
+          name="title"
+          style={{
+            position: 'static', // in-flow, not the usual absolute overlay
+            width: 'min(55vmin, 80%)',
+            height: 'auto', // keep the source aspect ratio
+            objectFit: 'contain',
+            marginBottom: 14,
+            borderRadius: 4,
+            boxShadow: '0 4px 18px rgba(0,0,0,0.6)',
+          }}
+        />
+      )}
       <div style={{ fontSize: 16, color: CFG.COLORS.parchment }}>Click to begin</div>
       <div style={{ fontSize: 12, color: CFG.COLORS.parchment, opacity: 0.7, marginTop: 10, maxWidth: 320 }}>
         Arrows/WASD move · Z bolt · X slash · C bind · Tab swap familiar
@@ -817,19 +845,35 @@ function HpBar({ label, hp, maxHp, color, align }) {
   );
 }
 
-function AbilitySlot({ label, name, fill, disabled }) {
+function AbilitySlot({ label, name, icon, fill, disabled }) {
   return (
     <div
       style={{
-        width: 116,
+        width: 132,
+        height: 30,
         padding: '4px 6px',
         border: `1px solid ${CFG.COLORS.ink}`,
         background: disabled ? 'rgba(232,220,196,0.25)' : 'rgba(232,220,196,0.55)',
         opacity: disabled ? 0.55 : 1,
         position: 'relative',
         overflow: 'hidden',
+        display: 'flex',
+        alignItems: 'center',
       }}
     >
+      {/* ability icon art (optional) — rendered FIRST so the cooldown-fill
+          overlay below paints on top of it (icon sits under the fill). */}
+      <Sprite
+        name={icon}
+        style={{
+          inset: 'auto',
+          right: 3,
+          top: '50%',
+          transform: 'translateY(-50%)',
+          width: 22,
+          height: 22,
+        }}
+      />
       <div
         style={{
           position: 'absolute',
@@ -841,7 +885,22 @@ function AbilitySlot({ label, name, fill, disabled }) {
           zIndex: 0,
         }}
       />
-      <div style={{ position: 'relative', zIndex: 1, fontSize: 11, fontWeight: 'bold', color: CFG.COLORS.ink }}>
+      {/* key label on a translucent parchment chip so it stays readable over
+          both the icon art and the cooldown fill */}
+      <div
+        style={{
+          position: 'relative',
+          zIndex: 1,
+          fontSize: 11,
+          fontWeight: 'bold',
+          color: CFG.COLORS.ink,
+          background: 'rgba(232,220,196,0.75)',
+          padding: '0 3px',
+          borderRadius: 2,
+          marginRight: 24, // keep clear of the icon on the right
+          whiteSpace: 'nowrap',
+        }}
+      >
         {label} · {name}
       </div>
     </div>
@@ -854,9 +913,9 @@ function AbilityBar({ B, activeStats, bindable }) {
   const bindFill = B.bindCdTimer > 0 ? 1 - B.bindCdTimer / CFG.BIND_FAIL_CD : bindable ? 1 : 0;
   return (
     <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
-      <AbilitySlot label="Z" name="Gilt Bolt" fill={boltFill} disabled={B.boltCdTimer > 0} />
-      <AbilitySlot label="X" name="Marginal Slash" fill={slashFill} disabled={B.slashCdTimer > 0} />
-      <AbilitySlot label="C" name="Wax Seal" fill={bindFill} disabled={!bindable || B.bindCdTimer > 0} />
+      <AbilitySlot label="Z" name="Gilt Bolt" icon="icon-inkwell" fill={boltFill} disabled={B.boltCdTimer > 0} />
+      <AbilitySlot label="X" name="Marginal Slash" icon="icon-slash" fill={slashFill} disabled={B.slashCdTimer > 0} />
+      <AbilitySlot label="C" name="Wax Seal" icon="icon-seal" fill={bindFill} disabled={!bindable || B.bindCdTimer > 0} />
     </div>
   );
 }
@@ -869,11 +928,15 @@ function OverworldView({ G }) {
   const tiles = [];
   for (let y = 0; y < CFG.MAP_ROWS; y++) {
     for (let x = 0; x < CFG.MAP_COLS; x++) {
+      const ch = MAP[y][x];
       tiles.push(
         <div
           key={`${x}-${y}`}
-          style={{ position: 'absolute', left: x * CFG.TILE_SIZE, top: y * CFG.TILE_SIZE, ...tileStyle(MAP[y][x]) }}
-        />
+          style={{ position: 'absolute', left: x * CFG.TILE_SIZE, top: y * CFG.TILE_SIZE, ...tileStyle(ch) }}
+        >
+          {/* shrine art layered over the gold square (which stays as fallback) */}
+          {ch === '+' && <Sprite name="shrine" />}
+        </div>
       );
     }
   }
@@ -940,14 +1003,18 @@ function TransitionView({ G }) {
             justifyContent: 'center',
           }}
         >
+          {/* escaping-beast vignette, dimmed behind the announcement text */}
+          <Sprite name="margin-escape" style={{ objectFit: 'contain', opacity: 0.45 }} />
           <div
             style={{
+              position: 'relative', // stacks above the vignette
               color: CFG.COLORS.vermilion,
               fontSize: 28,
               fontWeight: 'bold',
               letterSpacing: 2,
               textAlign: 'center',
               padding: '0 20px',
+              textShadow: '0 2px 10px rgba(0,0,0,0.95), 0 0 4px rgba(0,0,0,0.9)',
             }}
           >
             A BEAST SLIPS THE MARGIN!
@@ -1009,16 +1076,33 @@ function BattleView({ G, resultOverlay }) {
         <PartyChips party={G.party} activeIndex={B.activeIndex} />
       </div>
 
+      {/* Manuscript-page dressing: a padded ring around the grid filled with
+          the parchment texture, with the ornate page-frame stretched over it
+          so the (opaque) grid sits inside the frame's blank center. Both are
+          optional art — with no assets this is just transparent padding and
+          the battle looks exactly as before. Gameplay readability is safe by
+          construction: tiles, telegraphs, entities and projectiles all render
+          inside the opaque grid, above this dressing. */}
       <div
         style={{
           position: 'relative',
-          width: CFG.BCOLS * CFG.BTILE,
-          height: CFG.BROWS * CFG.BTILE,
+          width: CFG.BCOLS * CFG.BTILE + 2 * CFG.FRAME_PAD,
           margin: '0 auto',
-          border: `3px solid ${CFG.COLORS.ink}`,
+          padding: CFG.FRAME_PAD,
         }}
       >
-        {tiles}
+        <Sprite name="parchment" style={{ objectFit: 'cover' }} />
+        <Sprite name="page-frame" style={{ objectFit: 'fill', opacity: 0.9 }} />
+        <div
+          style={{
+            position: 'relative',
+            zIndex: 1,
+            width: CFG.BCOLS * CFG.BTILE,
+            height: CFG.BROWS * CFG.BTILE,
+            border: `3px solid ${CFG.COLORS.ink}`,
+          }}
+        >
+          {tiles}
         <div
           style={{
             position: 'absolute',
@@ -1083,6 +1167,7 @@ function BattleView({ G, resultOverlay }) {
             }}
           />
         ))}
+        </div>
       </div>
 
       <div style={{ marginTop: 10 }}>
@@ -1100,16 +1185,39 @@ function BattleView({ G, resultOverlay }) {
             justifyContent: 'center',
             flexDirection: 'column',
             zIndex: 20,
+            overflow: 'hidden',
           }}
         >
+          {/* wax-seal art stamped behind the BOUND text (bind success only) */}
+          {resultOverlay.reason === 'BOUND' && (
+            <Sprite
+              name="seal-bound"
+              style={{
+                inset: 'auto', // replace the default full-bleed placement
+                left: '50%',
+                top: '50%',
+                width: '30vmin',
+                height: '30vmin',
+                transform: 'translate(-50%, -50%) rotate(-8deg)', // stamped feel
+                borderRadius: 6,
+                boxShadow: '0 6px 24px rgba(0,0,0,0.7)',
+              }}
+            />
+          )}
           <div
             style={{
+              position: 'relative', // stacks above the seal art
               fontSize: 28,
               fontWeight: 'bold',
               color: resultOverlay.reason === 'DEFEAT' ? CFG.COLORS.vermilion : CFG.COLORS.gold,
               letterSpacing: 1,
               textAlign: 'center',
-              padding: '0 24px',
+              padding: '4px 24px',
+              // translucent ink chip + shadow keep the text readable over the
+              // opaque seal art (and are invisible-in-practice without it)
+              background: 'rgba(20,16,12,0.55)',
+              borderRadius: 4,
+              textShadow: '0 2px 8px rgba(0,0,0,0.9)',
             }}
           >
             {resultText(resultOverlay.reason, resultOverlay.extra)}
