@@ -1,5 +1,7 @@
 # INKBOUND
 
+**Play it: https://jlud7.github.io/inkbound/** (auto-deploys from `main` via GitHub Actions)
+
 You are a scribe in a medieval scriptorium. The beasts illuminated in the margins of your bestiary have slipped off the page. Explore the cloister grounds, corner them, weaken them, and bind them back into the book — your bound beasts become familiars that fight for you.
 
 ## Controls

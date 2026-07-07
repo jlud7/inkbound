@@ -256,6 +256,7 @@ function applyDamageToEnemy(G, dmg) {
 
 function applyDamageToPlayer(G, dmg) {
   const B = G.battle;
+  if (B.iframeTimer > 0) return; // i-frames block every damage source, incl. Grotesque swipes
   const active = G.party[B.activeIndex];
   if (active.hp <= 0) return; // already down, no double-dipping
   active.hp = Math.max(0, active.hp - dmg);
@@ -640,11 +641,14 @@ function stepBattle(G, dt) {
 const failedSprites = new Set();
 
 function Sprite({ name, style }) {
-  const [failed, setFailed] = useState(() => failedSprites.has(name));
-  if (failed || failedSprites.has(name)) return null;
+  // Failure is derived from the module Set on every render (never cached in
+  // state), so when a swapped familiar changes `name` the new sprite is
+  // re-checked correctly; the state below exists only to force a re-render.
+  const [, bump] = useState(0);
+  if (failedSprites.has(name)) return null;
   return (
     <img
-      src={`/assets/${name}.png`}
+      src={`assets/${name}.png`}
       alt=""
       draggable={false}
       style={{
@@ -658,7 +662,7 @@ function Sprite({ name, style }) {
       }}
       onError={() => {
         failedSprites.add(name);
-        setFailed(true);
+        bump((n) => n + 1);
       }}
     />
   );
@@ -1129,6 +1133,7 @@ export default function Inkbound() {
   const lastTsRef = useRef(null);
   const [, setTick] = useState(0); // bumped once per rAF frame to trigger a render
   const [started, setStarted] = useState(false);
+  const startedRef = useRef(false); // mirror for the mount-once key handlers
 
   // Single effect: attach input listeners + start the one and only rAF loop.
   // Runs once on mount; cleans up fully on unmount (listeners + rAF + timers).
@@ -1140,6 +1145,7 @@ export default function Inkbound() {
       if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' ', 'Tab'].includes(e.key)) {
         e.preventDefault();
       }
+      if (!startedRef.current) return; // keyboard is inert behind the click-to-begin overlay
       const action = actionFromKey(e);
       if (!action) return;
       const input = gameRef.current.input;
@@ -1197,6 +1203,7 @@ export default function Inkbound() {
   const phase = G.phase;
 
   function handleStart() {
+    startedRef.current = true;
     setStarted(true);
     if (wrapperRef.current) wrapperRef.current.focus();
   }

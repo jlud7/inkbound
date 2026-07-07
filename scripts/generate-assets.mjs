@@ -52,6 +52,12 @@ const REPLICATE_API_TOKEN = getEnv('REPLICATE_API_TOKEN', '');
 const IMAGE_MODEL = getEnv('IMAGE_MODEL', 'openai/gpt-image-2');
 const IMAGE_QUALITY = getEnv('IMAGE_QUALITY', 'medium');
 const MAX_BUDGET_USD = parseFloat(getEnv('MAX_BUDGET_USD', '4.50'));
+// A malformed value would parse to NaN, and `total > NaN` is always false —
+// which would silently disable the budget abort. Refuse to run instead.
+if (!Number.isFinite(MAX_BUDGET_USD)) {
+  console.error('ABORT: MAX_BUDGET_USD is not a valid number — fix it in .env.');
+  process.exit(1);
+}
 
 const DRY_RUN = process.argv.includes('--dry-run');
 
@@ -131,8 +137,14 @@ async function generateOne({ name, prompt }) {
   }
   let prediction = await res.json();
 
-  // If Prefer:wait didn't fully resolve it (long-running), poll until done.
+  // If Prefer:wait didn't fully resolve it (long-running), poll until done —
+  // capped at ~5 minutes so a stuck prediction fails loudly instead of hanging.
+  let polls = 0;
+  const MAX_POLLS = 200; // 200 x 1.5s = 5 min
   while (prediction.status !== 'succeeded' && prediction.status !== 'failed' && prediction.status !== 'canceled') {
+    if (++polls > MAX_POLLS) {
+      throw new Error(`Prediction for "${name}" still ${prediction.status} after 5 minutes — giving up.`);
+    }
     await new Promise((r) => setTimeout(r, 1500));
     const pollRes = await fetch(prediction.urls.get, {
       headers: { Authorization: `Bearer ${REPLICATE_API_TOKEN}` },
