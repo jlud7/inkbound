@@ -18,6 +18,13 @@ import React, { useEffect, useRef, useState } from 'react';
 // CFG — every tunable number in the game lives here.
 // ----------------------------------------------------------------------------
 const CFG = {
+  // Native facing of each sprite PNG ('right' = the artwork looks toward the
+  // viewer's right). Battle mirrors sprites so familiars face right and
+  // enemies face left; the overworld scribe faces his direction of travel.
+  SPRITE_FACING: {
+    scribe: 'right', quill: 'left', drollery: 'right',
+    grotesque: 'right', basilisk: 'left', 'snail-knight': 'right',
+  },
   // Overworld
   MAP_COLS: 24,
   MAP_ROWS: 16,
@@ -311,6 +318,7 @@ function makeInitialGame() {
       playerX: SPAWN.x,
       playerY: SPAWN.y,
       facing: 'down',
+      hFacing: 'right', // last horizontal travel direction — drives the scribe mirror
       stepTimerMs: CFG.STEP_MS, // "ready" so the first press steps immediately
       marginStreak: 0, // pity counter — consecutive margin steps w/o encounter
       shrineFlashTimer: 0,
@@ -700,6 +708,7 @@ function tryStep(G, dir) {
   const OW = G.overworld;
   const [dx, dy] = DIR_VECTORS[dir];
   OW.facing = dir;
+  if (dir === 'left' || dir === 'right') OW.hFacing = dir;
   const nx = OW.playerX + dx;
   const ny = OW.playerY + dy;
   if (ny < 0 || ny >= CFG.MAP_ROWS || nx < 0 || nx >= CFG.MAP_COLS) return;
@@ -887,8 +896,9 @@ function stepBattle(G, dt) {
   // --- projectile motion (must run even the frame the enemy dies) ---
   moveProjectiles(G, dt);
 
-  // --- enemy AI dispatch ---
-  if (B.enemy.hp > 0) {
+  // --- enemy AI dispatch (frozen once this battle's result is decided, so a
+  // just-bound beast can't land a parting hit in the same frame) ---
+  if (B.enemy.hp > 0 && !B.resultReason) {
     if (B.enemySpecies === 'Drollery') stepDrollery(G, dt);
     else if (B.enemySpecies === 'Grotesque') stepGrotesque(G, dt);
     else if (B.enemySpecies === 'Basilisk') stepBasilisk(G, dt);
@@ -949,6 +959,14 @@ function stepBattleEffects(G, dt) {
 // 404s once, never retries/spams on subsequent renders.
 // ============================================================================
 const failedSprites = new Set();
+
+// Style fragment that mirrors a sprite <img> when its artwork's native facing
+// (CFG.SPRITE_FACING) differs from the direction we want it to look. Applied
+// to the img itself so outer transforms (idle bob, shelled scale) compose safely.
+function spriteFlip(name, want) {
+  const nativeDir = CFG.SPRITE_FACING[name] || 'right';
+  return nativeDir !== want ? { transform: 'scaleX(-1)' } : undefined;
+}
 
 function Sprite({ name, style }) {
   // Failure is derived from the module Set on every render (never cached in
@@ -1040,8 +1058,8 @@ function battleTileHighlight(G, col, row) {
   if (B.enemy.hp > 0 && B.enemy.telegraphActive) {
     if (B.enemySpecies === 'Grotesque' && col === 2 && row === B.enemy.row) out.push('telegraph');
     if (B.enemySpecies === 'Basilisk' && row === B.enemy.row) out.push('telegraph');
-    // Snail-Knight lance: glows the player-side half of its locked row.
-    if (B.enemySpecies === 'Snail-Knight' && col < 3 && row === B.enemy.lanceRow) out.push('telegraph');
+    // Snail-Knight lance: glow exactly the tiles the strike will hit (cols 2+1).
+    if (B.enemySpecies === 'Snail-Knight' && (col === 1 || col === 2) && row === B.enemy.lanceRow) out.push('telegraph');
   }
   return out;
 }
@@ -1377,7 +1395,7 @@ function OverworldView({ G }) {
             boxSizing: 'border-box',
           }}
         >
-          <Sprite name="scribe" />
+          <Sprite name="scribe" style={spriteFlip('scribe', OW.hFacing)} />
         </div>
         {OW.shrineFlashTimer > 0 && (
           <div
@@ -1555,7 +1573,10 @@ function BattleView({ G, resultOverlay }) {
               filter: 'drop-shadow(0 5px 6px rgba(20,16,12,0.4))',
             }}
           >
-            <Sprite name={activeMember.species.toLowerCase()} />
+            <Sprite
+              name={activeMember.species.toLowerCase()}
+              style={spriteFlip(activeMember.species.toLowerCase(), 'right')}
+            />
           </div>
         </div>
 
@@ -1594,7 +1615,10 @@ function BattleView({ G, resultOverlay }) {
                 animation: B.enemy.riled ? 'inkbound-rile 0.9s ease-in-out infinite' : 'none',
               }}
             >
-              <Sprite name={B.enemySpecies.toLowerCase()} />
+              <Sprite
+                name={B.enemySpecies.toLowerCase()}
+                style={spriteFlip(B.enemySpecies.toLowerCase(), 'left')}
+              />
               {/* vermilion flash after a failed bind */}
               {B.enemy.bindFailFlashTimer > 0 && (
                 <div
